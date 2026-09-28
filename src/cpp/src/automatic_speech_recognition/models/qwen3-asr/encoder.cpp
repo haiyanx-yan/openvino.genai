@@ -13,10 +13,17 @@ namespace ov::genai {
 Qwen3ASREncoder::Qwen3ASREncoder(const std::filesystem::path& models_path,
                                  const std::string& device,
                                  const ov::AnyMap& properties)
-    : m_model_config{models_path / "config.json"} {
+    : m_model_config{models_path / "config.json"},
+      m_model_path{models_path / "openvino_encoder_model.xml"},
+      m_device{device},
+      m_properties{properties},
+      m_compile_for_npu{device == "NPU"} {
+    if (m_compile_for_npu) {
+        return;
+    }
+
     ov::Core core = utils::singleton_core();
-    ov::CompiledModel compiled_model =
-        core.compile_model(models_path / "openvino_encoder_model.xml", device, properties);
+    ov::CompiledModel compiled_model = core.compile_model(m_model_path, device, properties);
     ov::genai::utils::print_compiled_model_properties(compiled_model, "qwen3-asr encoder model");
     m_request = compiled_model.create_infer_request();
 }
@@ -25,6 +32,20 @@ ov::Tensor Qwen3ASREncoder::encode(const WhisperFeatures& features) {
     const size_t remainder_frames = features.n_frames % m_encoder_chunk_frames;
 
     ov::Tensor input_tensor = chunk_mel_features(features);
+    if (m_compile_for_npu) {
+        ov::Core core = utils::singleton_core();
+        auto model = core.read_model(m_model_path);
+        model->reshape({{"input_features", input_tensor.get_shape()}});
+        ov::AnyMap properties = m_properties;
+        properties["NPU_BATCH_MODE"] = "COMPILER";
+        ov::CompiledModel compiled_model = core.compile_model(model, m_device, properties);
+        ov::genai::utils::print_compiled_model_properties(compiled_model, "qwen3-asr encoder model");
+        auto request = compiled_model.create_infer_request();
+        request.set_tensor("input_features", input_tensor);
+        request.infer();
+        return merge_chunked_encoder_output(request.get_tensor("last_hidden_state"), remainder_frames);
+    }
+
     m_request.set_tensor("input_features", input_tensor);
 
     m_request.infer();

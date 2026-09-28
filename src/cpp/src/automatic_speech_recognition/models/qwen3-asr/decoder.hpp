@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <filesystem>
+
 #include <openvino/runtime/core.hpp>
 
 #include "openvino/genai/automatic_speech_recognition/generation_config.hpp"
@@ -29,6 +31,14 @@ public:
 private:
     InferRequest m_request;
     Sampler m_sampler;
+    std::filesystem::path m_model_path;
+    std::string m_device;
+    ov::AnyMap m_properties;
+    bool m_compile_for_npu = false;
+    ov::Shape m_context_shape;
+    size_t m_prompt_len = 0;
+
+    void compile_for_context(const ov::Tensor& input_ids, const ov::Tensor& encoder_hidden_states);
 };
 
 }  // namespace ov::genai

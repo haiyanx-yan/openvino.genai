@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <filesystem>
+
 #include "config.hpp"
 #include "openvino/core/core.hpp"
 #include "openvino/runtime/runtime.hpp"
@@ -19,6 +21,10 @@ public:
 private:
     InferRequest m_request;
     Qwen3ASRConfig m_model_config;
+    std::filesystem::path m_model_path;
+    std::string m_device;
+    ov::AnyMap m_properties;
+    bool m_compile_for_npu = false;
 
     // The original Qwen3-ASR encoder processes mel spectrograms in chunks of n_window * 2 frames
     // and applies positional embeddings independently to each chunk.

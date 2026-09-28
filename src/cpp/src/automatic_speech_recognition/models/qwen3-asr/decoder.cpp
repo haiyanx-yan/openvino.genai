@@ -15,12 +15,43 @@ namespace ov::genai {
 
 Qwen3ASRDecoder::Qwen3ASRDecoder(const std::filesystem::path& models_path,
                                  const std::string& device,
-                                 const ov::AnyMap& properties) {
+                                 const ov::AnyMap& properties)
+    : m_model_path{models_path / "openvino_decoder_model.xml"},
+      m_device{device},
+      m_properties{properties},
+      m_compile_for_npu{device == "NPU"} {
+    if (m_compile_for_npu) {
+        return;
+    }
+
     ov::Core core = utils::singleton_core();
-    ov::CompiledModel compiled_model =
-        core.compile_model(models_path / "openvino_decoder_model.xml", device, properties);
+    ov::CompiledModel compiled_model = core.compile_model(m_model_path, device, properties);
     ov::genai::utils::print_compiled_model_properties(compiled_model, "qwen3-asr decoder model");
     m_request = compiled_model.create_infer_request();
+}
+
+void Qwen3ASRDecoder::compile_for_context(const ov::Tensor& input_ids,
+                                          const ov::Tensor& encoder_hidden_states) {
+    const size_t prompt_len = input_ids.get_shape()[1];
+    if (!m_compile_for_npu || (m_context_shape == encoder_hidden_states.get_shape() && m_prompt_len == prompt_len)) {
+        return;
+    }
+
+    ov::Core core = utils::singleton_core();
+    auto model = core.read_model(m_model_path);
+    model->reshape({{"encoder_hidden_states", encoder_hidden_states.get_shape()},
+                    {"input_ids", ov::PartialShape{1, -1}},
+                    {"beam_idx", ov::PartialShape{-1}}});
+
+    ov::AnyMap properties = m_properties;
+    properties["NPU_USE_NPUW"] = "YES";
+    properties["NPUW_LLM"] = "YES";
+    properties["NPUW_LLM_MAX_PROMPT_LEN"] = std::to_string(prompt_len);
+    ov::CompiledModel compiled_model = core.compile_model(model, m_device, properties);
+    ov::genai::utils::print_compiled_model_properties(compiled_model, "qwen3-asr decoder model");
+    m_request = compiled_model.create_infer_request();
+    m_context_shape = encoder_hidden_states.get_shape();
+    m_prompt_len = prompt_len;
 }
 
 void Qwen3ASRDecoder::set_seed(size_t seed) {
@@ -36,6 +67,8 @@ EncodedResults Qwen3ASRDecoder::generate(const ov::Tensor& input_ids,
     const ov::Shape prompts_shape = input_ids.get_shape();
     const size_t batch_size = prompts_shape[0];
     OPENVINO_ASSERT(batch_size == 1 || !streamer_ptr, "Streaming is only supported with batch_size == 1");
+
+    compile_for_context(input_ids, encoder_hidden_states);
 
     // Reset decoder state for fresh generation
     m_request.reset_state();

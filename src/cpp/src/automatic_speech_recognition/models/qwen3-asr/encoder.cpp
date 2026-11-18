@@ -4,6 +4,7 @@
 #include "encoder.hpp"
 
 #include <cstring>
+#include <iostream>
 
 #include "openvino/runtime/core.hpp"
 #include "utils.hpp"
@@ -29,9 +30,23 @@ Qwen3ASREncoder::Qwen3ASREncoder(const std::filesystem::path& models_path,
 }
 
 ov::Tensor Qwen3ASREncoder::encode(const WhisperFeatures& features) {
-    const size_t remainder_frames = features.n_frames % m_encoder_chunk_frames;
+    const size_t input_remainder_frames = features.n_frames % m_encoder_chunk_frames;
+    // For short NPU inputs, use the unpadded feature sequence when it fits in
+    // the same memory envelope as at most three regular encoder chunks.
+    const bool use_full_audio_npu = m_compile_for_npu && input_remainder_frames > 0 &&
+                                    features.n_frames <= 3 * m_encoder_chunk_frames;
+    const size_t remainder_frames = use_full_audio_npu ? 0 : input_remainder_frames;
 
-    ov::Tensor input_tensor = chunk_mel_features(features);
+    ov::Tensor input_tensor;
+    if (use_full_audio_npu) {
+        OPENVINO_ASSERT(features.n_frames > 0, "Qwen3-ASR encoder input features must contain at least one frame.");
+        input_tensor = ov::Tensor(ov::element::f32, {1, features.feature_size, features.n_frames});
+        std::memcpy(input_tensor.data<float>(), features.data.data(), features.data.size() * sizeof(float));
+        std::clog << "Qwen3-ASR NPU short-tail encoder mode is enabled; input shape: "
+                  << input_tensor.get_shape() << std::endl;
+    } else {
+        input_tensor = chunk_mel_features(features);
+    }
     if (m_compile_for_npu) {
         ov::Core core = utils::singleton_core();
         auto model = core.read_model(m_model_path);
